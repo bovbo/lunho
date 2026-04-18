@@ -3,7 +3,6 @@ name: Lunes Auto Login(Sweet-Node6-US)
 on:
   workflow_dispatch:
   schedule:
-    # 每天北京/河内/曼谷时区（UTC+7）07:00 执行一次
     - cron: "0 23 * * *"
 
 jobs:
@@ -18,37 +17,28 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22  # 升级到 v22，解决 Node 20 弃用警告
-          cache: 'npm'      # 开启 npm 缓存，加快后续运行速度
+          node-version: 22
 
-      - name: Install Dependencies
+      - name: Install
         run: |
+          # 强制安装依赖，不管有没有 lock 文件
           npm install
-          # 只安装 chromium 以节省时间，--with-deps 确保系统库完整
+          # 安装 Playwright 浏览器及其系统依赖
           npx playwright install --with-deps chromium
 
-      - name: Run Login Script
-        id: login_step
+      - name: Run
         env:
           LUNES_USERNAME: ${{ secrets.LUNES_USERNAME }}
           LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          node -v
-          npm run login
-        # 去掉了之前的 continue-on-error，这样报错能直接在面板看到
+          node scripts/login.js
 
-      - name: Archive screenshots & logs
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots-and-logs
-          path: |
-            *.png
-            logs/
+          name: screenshots
+          path: "*.png"
           if-no-files-found: ignore
-
-      - name: Notify on Failure
-        if: failure()
-        run: echo "Workflow failed. Check the logs and artifacts."
