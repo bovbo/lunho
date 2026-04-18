@@ -1,22 +1,14 @@
-name: Lunes Auto Login(Sweet-Node6-US)
+name: Lunes Auto Login
 
 on:
   workflow_dispatch:
-   # schedule:
-    # 每天北京/河内/曼谷时区（UTC+7）07:00 执行一次（按需调整）
-     # - cron: "30 1 */4 * *"  # GitHub 使用 UTC，这里是 UTC 1:30 =北京 9:30
+  # schedule:
+  #   - cron: "30 1 */4 * *"
 
 jobs:
   login:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
-    env:
-      # 从 GitHub Secrets 注入
-      LUNES_USERNAME: ${{ secrets.LUNES_USERNAME }}
-      LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout
@@ -28,26 +20,35 @@ jobs:
           node-version: 20
 
       - name: Install deps
+        # 直接使用 npm install，它更兼容缺少 lock 文件的情况
         run: |
-          npm ci || npm i
+          npm install
           npx playwright install --with-deps chromium
 
       - name: Run login
+        # 给这一步加个 id，方便后面判断
+        id: login_step
+        env:
+          LUNES_USERNAME: ${{ secrets.LUNES_USERNAME }}
+          LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          node -v
-          npm -v
           npm run login
-        continue-on-error: true
 
       - name: Archive screenshots & logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: screenshots-and-logs
-          path: |
-            *.png
+          path: "*.png"
           if-no-files-found: ignore
 
-      - name: Fail job if script failed
-        if: ${{ steps.login.outcome == 'failure' }}
-        run: exit 1
+      - name: Check Status
+        if: always()
+        run: |
+          # 只有当 login 步骤真的运行并报错时，才让 Actions 显示红色警告
+          if [[ "${{ steps.login_step.outcome }}" == "failure" ]]; then
+            echo "脚本执行失败，请检查 Artifacts 中的截图"
+            exit 1
+          fi
