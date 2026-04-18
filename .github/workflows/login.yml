@@ -1,40 +1,32 @@
 name: Lunes Auto Login
-
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "30 1 */4 * *"
-
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Install deps
-        # 直接使用 npm install，它更兼容缺少 lock 文件的情况
+          cache: 'npm'
+      - name: Install
         run: |
           npm install
-          npx playwright install --with-deps chromium
-
-      - name: Run login
-        # 给这一步加个 id，方便后面判断
-        id: login_step
+      - name: Run
         env:
           LUNES_USERNAME: ${{ secrets.LUNES_USERNAME }}
           LUNES_PASSWORD: ${{ secrets.LUNES_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          npm run login
+          WEBSITE_URL: "https://lunes.me/login"
+        run: npm run login
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot
+          path: login-failure.png          npm run login
 
       - name: Archive screenshots & logs
         if: always()
