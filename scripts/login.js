@@ -1,47 +1,40 @@
-// scripts/login.js
 import { chromium } from '@playwright/test';
 import fs from 'fs';
 
+// 目标地址
 const LOGIN_URL = 'https://ctrl.lunes.host/auth/login';
+const SERVER_ID = '67c5467e';
 
-// Telegram 通知
+// Telegram 通知函数
 async function notifyTelegram({ ok, stage, msg, screenshotPath }) {
   try {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
-    if (!token || !chatId) {
-      console.log('[WARN] TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未设置，跳过通知');
-      return;
-    }
+    if (!token || !chatId) return;
 
     const text = [
       `🔔 Lunes 自动操作：${ok ? '✅ 成功' : '❌ 失败'}`,
       `阶段：${stage}`,
       msg ? `信息：${msg}` : '',
-      `时间：${new Date().toISOString()}`
+      `时间：${new Date().toLocaleString()}`
     ].filter(Boolean).join('\n');
 
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true
-      })
+      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true })
     });
 
-    // 如果有截图，再发图
     if (screenshotPath && fs.existsSync(screenshotPath)) {
       const photoUrl = `https://api.telegram.org/bot${token}/sendPhoto`;
       const form = new FormData();
       form.append('chat_id', chatId);
-      form.append('caption', `Lunes 自动操作截图（${stage}）`);
+      form.append('caption', `截图：${stage}`);
       form.append('photo', new Blob([fs.readFileSync(screenshotPath)]), 'screenshot.png');
       await fetch(photoUrl, { method: 'POST', body: form });
     }
   } catch (e) {
-    console.log('[WARN] Telegram 通知失败：', e.message);
+    console.log('[WARN] TG 通知失败：', e.message);
   }
 }
 
@@ -62,110 +55,74 @@ async function main() {
 
   const context = await browser.newContext({ viewport: { width: 1366, height: 768 } });
   const page = await context.newPage();
-
   const screenshot = (name) => `./${name}.png`;
 
   try {
-    // 1) 打开登录页
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    // 1) 访问登录页
+    console.log('正在打开登录页...');
+    await page.goto(LOGIN_URL, { waitUntil: 'networkidle', timeout: 60000 });
 
-
-
-    // 2) 输入用户名密码
-    const userInput = page.locator('input[name="username"]');
-    const passInput = page.locator('input[name="password"]');
-    await userInput.waitFor({ state: 'visible', timeout: 30_000 });
-    await passInput.waitFor({ state: 'visible', timeout: 30_000 });
-
-    await userInput.fill(username);
-    await passInput.fill(password);
-
+    // 2) 填写登录信息
+    await page.locator('input[name="username"]').fill(username);
+    await page.locator('input[name="password"]').fill(password);
+    
     const loginBtn = page.locator('button[type="submit"]');
-    await loginBtn.waitFor({ state: 'visible', timeout: 15_000 });
-
-    const spBefore = screenshot('02-before-submit');
-    await page.screenshot({ path: spBefore, fullPage: true });
-
     await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
-      loginBtn.click({ timeout: 10_000 })
+      page.waitForNavigation({ waitUntil: 'networkidle' }).catch(() => {}),
+      loginBtn.click()
     ]);
 
-    // 3) 登录结果截图
-    const spAfter = screenshot('03-after-submit');
-    await page.screenshot({ path: spAfter, fullPage: true });
-
+    // 3) 检查登录状态
     const url = page.url();
-    const successHint = await page.locator('text=/Dashboard|Logout|Sign out|控制台|面板/i').first().count();
-    const stillOnLogin = /\/auth\/login/i.test(url);
+    const isSuccess = await page.locator('text=/Dashboard|Logout|控制台|面板/i').first().count() > 0 || !url.includes('/auth/login');
 
-    if (!stillOnLogin || successHint > 0) {
-      await notifyTelegram({ ok: true, stage: '登录成功', msg: `当前 URL：${url}`, screenshotPath: spAfter });
-
-      // **进入服务器详情**
-      const serverLink = page.locator('a[href="/server/67c5467e"]');
-      await serverLink.waitFor({ state: 'visible', timeout: 20_000 });
-      await serverLink.click({ timeout: 10_000 });
-
-      await page.waitForLoadState('networkidle', { timeout: 30_000 });
+    if (isSuccess) {
+      console.log('登录成功，进入服务器详情...');
+      
+      // 直接跳转到服务器 ID 页面，比点击链接更稳
+      await page.goto(`https://ctrl.lunes.host/server/${SERVER_ID}`, { waitUntil: 'networkidle' });
+      
       const spServer = screenshot('04-server-page');
-      await page.screenshot({ path: spServer, fullPage: true });
-      await notifyTelegram({ ok: true, stage: '进入服务器页面', msg: '已成功打开服务器详情', screenshotPath: spServer });
+      await page.screenshot({ path: spServer });
+      await notifyTelegram({ ok: true, stage: '进入服务器页', msg: `已进入服务器 ${SERVER_ID}`, screenshotPath: spServer });
 
-      // **点击 Console 菜单**
-      const consoleMenu = page.locator('a[href="/server/67c5467e"].active');
-      await consoleMenu.waitFor({ state: 'visible', timeout: 15_000 });
-      await consoleMenu.click({ timeout: 5_000 });
-
-      await page.waitForLoadState('networkidle', { timeout: 10_000 });
-
-      // **点击 Restart 按钮**
+      // 4) 点击 Restart 按钮
+      console.log('点击 Restart...');
       const restartBtn = page.locator('button:has-text("Restart")');
-      await restartBtn.waitFor({ state: 'visible', timeout: 15_000 });
+      await restartBtn.waitFor({ state: 'visible', timeout: 15000 });
       await restartBtn.click();
-      await notifyTelegram({ ok: true, stage: '点击 Restart', msg: 'VPS 正在重启' });
+      await notifyTelegram({ ok: true, stage: '重启操作', msg: '已触发 Restart 按钮' });
 
-      // 等待 VPS 重启（约 10 秒）
+      // 等待重启缓冲
       await page.waitForTimeout(10000);
 
-      // **输入命令并回车**
-      const commandInput = page.locator('input[placeholder="Type a command..."]');
-      await commandInput.waitFor({ state: 'visible', timeout: 20_000 });
-      await commandInput.fill('working properly');
-      await commandInput.press('Enter');
-
-      // 等待输出稳定
-      await page.waitForTimeout(5000);
-
-      // 截图并通知
-      const spCommand = screenshot('05-command-executed');
-      await page.screenshot({ path: spCommand, fullPage: true });
-      await notifyTelegram({ ok: true, stage: '命令执行完成', msg: 'restart.sh 已执行', screenshotPath: spCommand });
+      // 5) 输入命令
+      console.log('执行命令...');
+      const commandInput = page.locator('input[placeholder*="Type a command"]');
+      if (await commandInput.count() > 0) {
+        await commandInput.fill('working properly');
+        await commandInput.press('Enter');
+        await page.waitForTimeout(5000);
+        
+        const spCmd = screenshot('05-command-done');
+        await page.screenshot({ path: spCmd });
+        await notifyTelegram({ ok: true, stage: '命令执行', msg: '指令已下发', screenshotPath: spCmd });
+      }
 
       process.exitCode = 0;
-      return;
+    } else {
+      throw new Error('登录后仍停留在登录页面');
     }
 
-    // 登录失败处理
-    const errorMsgNode = page.locator('text=/Invalid|incorrect|错误|失败|无效/i');
-    const hasError = await errorMsgNode.count();
-    const errorMsg = hasError ? await errorMsgNode.first().innerText().catch(() => '') : '';
-    await notifyTelegram({
-      ok: false,
-      stage: '登录失败',
-      msg: errorMsg ? `疑似失败（${errorMsg}）` : '仍在登录页',
-      screenshotPath: spAfter
-    });
-    process.exitCode = 1;
   } catch (e) {
-    const sp = screenshot('99-error');
-    try { await page.screenshot({ path: sp, fullPage: true }); } catch {}
-    await notifyTelegram({ ok: false, stage: '异常', msg: e?.message || String(e), screenshotPath: fs.existsSync(sp) ? sp : undefined });
+    console.error('发生异常:', e.message);
+    const spErr = screenshot('99-error');
+    await page.screenshot({ path: spErr }).catch(() => {});
+    await notifyTelegram({ ok: false, stage: '任务异常', msg: e.message, screenshotPath: spErr });
     process.exitCode = 1;
   } finally {
-    await context.close();
     await browser.close();
   }
 }
 
-await main();
+main();
