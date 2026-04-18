@@ -121,7 +121,7 @@ async function main() {
             console.log('登录成功！开始执行服务器任务...');
             
             // 5. 服务器自动化流程
-            await page.goto('https://ctrl.lunes.host/server/71745', { waitUntil: 'networkidle' });
+            await page.goto('https://ctrl.lunes.host/server/67c5467e', { waitUntil: 'networkidle' });
             await randomDelay(2000, 4000);
             
             // 点击 Restart
