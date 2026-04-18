@@ -1,180 +1,156 @@
-// scripts/login.js
-import { chromium } from '@playwright/test';
+import { chromium } from 'playwright-extra';
+import stealth from 'puppeteer-extra-plugin-stealth';
+import axios from 'axios';
 import fs from 'fs';
+import FormData from 'form-data';
 
-// const LOGIN_URL = 'https://ctrl.lunes.host/auth/login';
-const LOGIN_URL = 'https://betadash.lunes.host/servers/71745';
+// 启用 Stealth 插件抹除自动化指纹
+chromium.use(stealth());
 
-// Telegram 通知
-async function notifyTelegram({ ok, stage, msg, screenshotPath }) {
-  try {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-    if (!token || !chatId) {
-      console.log('[WARN] TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 未设置，跳过通知');
-      return;
+// --- 工具函数：随机延迟 ---
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const randomDelay = (min, max) => delay(Math.floor(Math.random() * (max - min + 1) + min));
+
+// --- 模拟真人行为：随机鼠标移动 ---
+async function simulateHumanMovement(page) {
+    const size = page.viewportSize();
+    for (let i = 0; i < 8; i++) {
+        const x = Math.floor(Math.random() * size.width);
+        const y = Math.floor(Math.random() * size.height);
+        await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 15) + 5 });
+        await randomDelay(100, 400);
     }
-
-    const text = [
-      `🔔 Lunes 自动操作：${ok ? '✅ 成功' : '❌ 失败'}`,
-      `阶段：${stage}`,
-      msg ? `信息：${msg}` : '',
-      `时间：${new Date().toISOString()}`
-    ].filter(Boolean).join('\n');
-
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        disable_web_page_preview: true
-      })
-    });
-
-    // 如果有截图，再发图
-    if (screenshotPath && fs.existsSync(screenshotPath)) {
-      const photoUrl = `https://api.telegram.org/bot${token}/sendPhoto`;
-      const form = new FormData();
-      form.append('chat_id', chatId);
-      form.append('caption', `Lunes 自动操作截图（${stage}）`);
-      form.append('photo', new Blob([fs.readFileSync(screenshotPath)]), 'screenshot.png');
-      await fetch(photoUrl, { method: 'POST', body: form });
-    }
-  } catch (e) {
-    console.log('[WARN] Telegram 通知失败：', e.message);
-  }
 }
 
-function envOrThrow(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`环境变量 ${name} 未设置`);
-  return v;
+// --- Telegram 通知系统 ---
+async function notifyTelegram({ ok, stage, msg, screenshotPath }) {
+    const { TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: chatId } = process.env;
+    if (!token || !chatId) return;
+
+    const text = `🔔 *Lunes 任务通知*\n状态: ${ok ? '✅ 成功' : '❌ 失败'}\n阶段: ${stage}\n详情: ${msg || '无'}\n时间: ${new Date().toLocaleString()}`;
+    
+    try {
+        // 发送文字
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+            chat_id: chatId, text, parse_mode: 'Markdown'
+        });
+        // 发送截图
+        if (screenshotPath && fs.existsSync(screenshotPath)) {
+            const form = new FormData();
+            form.append('chat_id', chatId);
+            form.append('photo', fs.createReadStream(screenshotPath));
+            await axios.post(`https://api.telegram.org/bot${token}/sendPhoto`, form, { headers: form.getHeaders() });
+        }
+    } catch (e) { console.error('TG通知失败:', e.message); }
+}
+
+// --- 2Captcha 过 Cloudflare Turnstile ---
+async function solveTurnstile(page, url) {
+    const apiKey = process.env.CAPTCHA_API_KEY;
+    if (!apiKey) throw new Error('未配置 CAPTCHA_API_KEY');
+
+    // 获取 Sitekey
+    const sitekey = await page.evaluate(() => {
+        const el = document.querySelector('.cf-turnstile') || document.querySelector('[data-sitekey]');
+        return el ? el.getAttribute('data-sitekey') || el.dataset.sitekey : null;
+    });
+
+    if (!sitekey) return console.log('未检测到 Turnstile，尝试直接操作');
+
+    console.log('正在请求 2Captcha 解析 Turnstile...');
+    const res = await axios.post('http://2captcha.com/in.php', {
+        key: apiKey, method: 'turnstile', sitekey, pageurl: url, json: 1
+    });
+
+    const taskId = res.data.request;
+    for (let i = 0; i < 30; i++) {
+        await delay(5000);
+        const check = await axios.get(`http://2captcha.com/res.php?key=${apiKey}&action=get&id=${taskId}&json=1`);
+        if (check.data.status === 1) {
+            const token = check.data.request;
+            await page.evaluate((t) => {
+                const input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input) input.value = t;
+                if (window.cfCallback) window.cfCallback();
+                if (window.turnstile) window.turnstile.render(); // 强制触发回调
+            }, token);
+            console.log('Turnstile 验证已注入');
+            return;
+        }
+    }
+    throw new Error('Turnstile 解析超时');
 }
 
 async function main() {
-  const username = envOrThrow('LUNES_USERNAME');
-  const password = envOrThrow('LUNES_PASSWORD');
-
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
-
-  const context = await browser.newContext({ viewport: { width: 1366, height: 768 } });
-  const page = await context.newPage();
-
-  const screenshot = (name) => `./${name}.png`;
-
-  try {
-    // 1) 打开登录页
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-
-    // 检查人机验证
-    const humanCheckText = await page.locator('text=/Verify you are human|需要验证|安全检查|review the security/i').first();
-    if (await humanCheckText.count()) {
-      const sp = screenshot('01-human-check');
-      await page.screenshot({ path: sp, fullPage: true });
-      await notifyTelegram({ ok: false, stage: '打开登录页', msg: '检测到人机验证页面', screenshotPath: sp });
-      process.exitCode = 2;
-      return;
-    }
-
-    // 2) 输入用户名密码
-    const userInput = page.locator('input[name="username"]');
-    const passInput = page.locator('input[name="password"]');
-    await userInput.waitFor({ state: 'visible', timeout: 30_000 });
-    await passInput.waitFor({ state: 'visible', timeout: 30_000 });
-
-    await userInput.fill(username);
-    await passInput.fill(password);
-
-    const loginBtn = page.locator('button[type="submit"]');
-    await loginBtn.waitFor({ state: 'visible', timeout: 30_000 });
-
-    const spBefore = screenshot('02-before-submit');
-    await page.screenshot({ path: spBefore, fullPage: true });
-
-    await Promise.all([
-      page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {}),
-      loginBtn.click({ timeout: 10_000 })
-    ]);
-
-    // 3) 登录结果截图
-    const spAfter = screenshot('03-after-submit');
-    await page.screenshot({ path: spAfter, fullPage: true });
-
-    const url = page.url();
-    const successHint = await page.locator('text=/Dashboard|Logout|Sign out|控制台|面板/i').first().count();
-    const stillOnLogin = /\/auth\/login/i.test(url);
-
-    if (!stillOnLogin || successHint > 0) {
-      await notifyTelegram({ ok: true, stage: '登录成功', msg: `当前 URL：${url}`, screenshotPath: spAfter });
-
-      // **进入服务器详情**
-      const serverLink = page.locator('a[href="/server/71745"]');
-      await serverLink.waitFor({ state: 'visible', timeout: 20_000 });
-      await serverLink.click({ timeout: 10_000 });
-
-      await page.waitForLoadState('networkidle', { timeout: 30_000 });
-      const spServer = screenshot('04-server-page');
-      await page.screenshot({ path: spServer, fullPage: true });
-      await notifyTelegram({ ok: true, stage: '进入服务器页面', msg: '已成功打开服务器详情', screenshotPath: spServer });
-
-      // **点击 Console 菜单**
-      const consoleMenu = page.locator('a[href="/server/71745"].active');
-      await consoleMenu.waitFor({ state: 'visible', timeout: 15_000 });
-      await consoleMenu.click({ timeout: 5_000 });
-
-      await page.waitForLoadState('networkidle', { timeout: 10_000 });
-
-      // **点击 Restart 按钮**
-      const restartBtn = page.locator('button:has-text("Restart")');
-      await restartBtn.waitFor({ state: 'visible', timeout: 15_000 });
-      await restartBtn.click();
-      await notifyTelegram({ ok: true, stage: '点击 Restart', msg: 'VPS 正在重启' });
-
-      // 等待 VPS 重启（约 10 秒）
-      await page.waitForTimeout(10000);
-
-      // **输入命令并回车**
-      const commandInput = page.locator('input[placeholder="Type a command..."]');
-      await commandInput.waitFor({ state: 'visible', timeout: 20_000 });
-      await commandInput.fill('working properly');
-      await commandInput.press('Enter');
-
-      // 等待输出稳定
-      await page.waitForTimeout(5000);
-
-      // 截图并通知
-      const spCommand = screenshot('05-command-executed');
-      await page.screenshot({ path: spCommand, fullPage: true });
-      await notifyTelegram({ ok: true, stage: '命令执行完成', msg: 'restart.sh 已执行', screenshotPath: spCommand });
-
-      process.exitCode = 0;
-      return;
-    }
-
-    // 登录失败处理
-    const errorMsgNode = page.locator('text=/Invalid|incorrect|错误|失败|无效/i');
-    const hasError = await errorMsgNode.count();
-    const errorMsg = hasError ? await errorMsgNode.first().innerText().catch(() => '') : '';
-    await notifyTelegram({
-      ok: false,
-      stage: '登录失败',
-      msg: errorMsg ? `疑似失败（${errorMsg}）` : '仍在登录页',
-      screenshotPath: spAfter
+    const browser = await chromium.launch({ headless: true });
+    // 关键：模拟真实 Windows Chrome 指纹
+    const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        locale: 'en-US',
+        timezoneId: 'America/New_York'
     });
-    process.exitCode = 1;
-  } catch (e) {
-    const sp = screenshot('99-error');
-    try { await page.screenshot({ path: sp, fullPage: true }); } catch {}
-    await notifyTelegram({ ok: false, stage: '异常', msg: e?.message || String(e), screenshotPath: fs.existsSync(sp) ? sp : undefined });
-    process.exitCode = 1;
-  } finally {
-    await context.close();
-    await browser.close();
-  }
+    
+    const page = await context.newPage();
+    const screenshot = (name) => `./${name}.png`;
+
+    try {
+        // 1. 访问登录页
+        console.log('访问 Lunes Login...');
+        await page.goto('https://ctrl.lunes.host/auth/login', { waitUntil: 'load' });
+        await simulateHumanMovement(page);
+        
+        // 2. 检测并过验证
+        await solveTurnstile(page, page.url());
+        await randomDelay(1000, 2000);
+
+        // 3. 模拟真人输入
+        console.log('输入凭据...');
+        await page.type('input[name="username"]', process.env.LUNES_USERNAME, { delay: Math.random() * 100 + 50 });
+        await page.type('input[name="password"]', process.env.LUNES_PASSWORD, { delay: Math.random() * 100 + 50 });
+        
+        const loginBtn = page.locator('button[type="submit"]');
+        await loginBtn.hover();
+        await randomDelay(500, 1500);
+        await loginBtn.click();
+
+        // 4. 等待登录成功跳转
+        await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30000 });
+        
+        if (page.url().includes('/dashboard') || await page.locator('text=/Dashboard|Logout/i').count() > 0) {
+            console.log('登录成功！开始执行服务器任务...');
+            
+            // 5. 服务器自动化流程
+            await page.goto('https://ctrl.lunes.host/server/71745', { waitUntil: 'networkidle' });
+            await randomDelay(2000, 4000);
+            
+            // 点击 Restart
+            const restartBtn = page.locator('button:has-text("Restart")');
+            await restartBtn.click();
+            console.log('已下发 Restart 指令');
+            await delay(10000); // 等待重启引导
+
+            // 输入指令
+            const cmdInput = page.locator('input[placeholder*="Type a command"]');
+            await cmdInput.fill('working properly');
+            await cmdInput.press('Enter');
+            await delay(5000);
+
+            const sp = screenshot('final-success');
+            await page.screenshot({ path: sp, fullPage: true });
+            await notifyTelegram({ ok: true, stage: '完整流程完成', msg: '账号登录成功且服务器已执行重启及指令', screenshotPath: sp });
+        } else {
+            throw new Error(`未能进入 Dashboard，当前 URL: ${page.url()}`);
+        }
+
+    } catch (e) {
+        const sp = screenshot('error-log');
+        await page.screenshot({ path: sp, fullPage: true });
+        await notifyTelegram({ ok: false, stage: '脚本异常', msg: e.message, screenshotPath: sp });
+        process.exit(1);
+    } finally {
+        await browser.close();
+    }
 }
 
-await main();
+main();
