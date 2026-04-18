@@ -26,21 +26,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: screenshot
-          path: login-failure.png          npm run login
-
-      - name: Archive screenshots & logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: screenshots-and-logs
-          path: "*.png"
-          if-no-files-found: ignore
-
-      - name: Check Status
-        if: always()
-        run: |
-          # 只有当 login 步骤真的运行并报错时，才让 Actions 显示红色警告
-          if [[ "${{ steps.login_step.outcome }}" == "failure" ]]; then
-            echo "脚本执行失败，请检查 Artifacts 中的截图"
-            exit 1
-          fi
+          path: login-failure.png
